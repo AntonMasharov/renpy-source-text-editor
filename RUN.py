@@ -1,14 +1,10 @@
 from flask import Flask, render_template_string, request, jsonify
 import re
 import os
-import glob
 
 app = Flask(__name__)
 
-# По умолчанию ищем в текущей папке и в подпапках (например, game/)
 PROJECT_DIR = os.getcwd()
-CURRENT_FILE = None
-
 TEXT_PATTERN = re.compile(r'^(\s*)"([^"\\]*(?:\\.[^"\\]*)*)"(\s*)$')
 
 HTML_TEMPLATE = """
@@ -23,15 +19,26 @@ HTML_TEMPLATE = """
         .controls { display: flex; align-items: center; gap: 10px; flex-grow: 1; }
         select { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 8px 12px; border-radius: 6px; font-size: 14px; flex-grow: 1; max-width: 400px; cursor: pointer; }
         select:focus { border-color: #007acc; outline: none; }
-        button { background: #0e639c; color: white; border: none; padding: 9px 20px; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 14px; transition: background 0.2s; white-space: nowrap; }
+
+        button { background: #0e639c; color: white; border: none; padding: 9px 20px; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 14px; transition: all 0.2s; white-space: nowrap; }
         button:hover { background: #1177bb; }
+        button:disabled { background: #444; color: #888; cursor: not-allowed; }
+
         .btn-reload { background: #333; }
         .btn-reload:hover { background: #444; }
+
         .editor-box { position: relative; }
-        textarea { width: 100%; height: 75vh; background: #1e1e1e; color: #9cdcfe; border: 1px solid #3c3c3c; padding: 15px; font-size: 16px; line-height: 1.6; border-radius: 8px; box-sizing: border-box; resize: vertical; font-family: inherit; white-space: pre; }
+        textarea { width: 100%; height: 73vh; background: #1e1e1e; color: #9cdcfe; border: 1px solid #3c3c3c; padding: 15px; font-size: 16px; line-height: 1.6; border-radius: 8px; box-sizing: border-box; resize: vertical; font-family: inherit; white-space: pre; }
         textarea:focus { border-color: #007acc; outline: none; }
-        .info { color: #888; font-size: 13px; margin-bottom: 10px; display: flex; justify-content: space-between; }
-        .status { color: #4ec9b0; font-weight: bold; }
+
+        .info { color: #888; font-size: 13px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+
+        /* Стили для счетчика */
+        .counter-badge { font-weight: bold; padding: 4px 10px; border-radius: 4px; font-size: 13px; }
+        .counter-ok { background: #133a1b; color: #4ec9b0; border: 1px solid #256631; }
+        .counter-err { background: #4a1515; color: #f48771; border: 1px solid #8a2222; }
+
+        .status { color: #4ec9b0; font-weight: bold; margin-left: 10px; }
     </style>
 </head>
 <body>
@@ -42,19 +49,23 @@ HTML_TEMPLATE = """
                 <select id="file-select" onchange="loadFile()"></select>
                 <button class="btn-reload" onclick="scanFiles()" title="Обновить список файлов">🔄</button>
             </div>
-            <button onclick="saveData()">Сохранить изменения</button>
+            <button id="save-btn" onclick="saveData()">Сохранить изменения</button>
         </div>
         <div class="info">
-            <span>* Одна строка = одна реплика. Не добавляйте/не удаляйте пустые строки, чтобы не сбить синхронизацию.</span>
-            <span id="status-msg" class="status"></span>
+            <span>* Одна строка = одна реплика. Изменение количества строк заблокировано.</span>
+            <div>
+                <span id="line-counter" class="counter-badge counter-ok">Строк: 0 / 0</span>
+                <span id="status-msg" class="status"></span>
+            </div>
         </div>
         <div class="editor-box">
-            <textarea id="text-editor" placeholder="Выберите .rpy файл из списка выше..."></textarea>
+            <textarea id="text-editor" oninput="validateLines()" placeholder="Выберите .rpy файл из списка выше..."></textarea>
         </div>
     </div>
 
     <script>
-        // Сканирование доступных файлов
+        let originalLineCount = 0;
+
         async function scanFiles() {
             const res = await fetch('/list_files');
             const files = await res.json();
@@ -73,32 +84,53 @@ HTML_TEMPLATE = """
                 select.appendChild(opt);
             });
 
-            // Загружаем первый файл
             loadFile();
         }
 
-        // Загрузка текста из выбранного файла
         async function loadFile() {
             const filepath = document.getElementById('file-select').value;
             if (!filepath) return;
 
             showStatus('Загрузка...');
             const res = await fetch(`/get_data?file=${encodeURIComponent(filepath)}`);
-            const text = await res.text();
+            const data = await res.json();
 
-            document.getElementById('text-editor').value = text;
+            document.getElementById('text-editor').value = data.text;
+            originalLineCount = data.count;
+
+            validateLines();
             showStatus('Загружено');
         }
 
-        // Сохранение изменений
+        // Подсчет и валидация строк в реальном времени
+        function validateLines() {
+            const text = document.getElementById('text-editor').value;
+            // Разбиваем текст по переносам строк
+            const currentLines = text ? text.split('\\n').length : 0;
+
+            const counterBadge = document.getElementById('line-counter');
+            const saveBtn = document.getElementById('save-btn');
+
+            counterBadge.textContent = `Строк: ${currentLines} / ${originalLineCount}`;
+
+            if (currentLines === originalLineCount) {
+                counterBadge.className = 'counter-badge counter-ok';
+                saveBtn.disabled = false;
+                saveBtn.title = '';
+            } else {
+                counterBadge.className = 'counter-badge counter-err';
+                saveBtn.disabled = true;
+                const diff = currentLines - originalLineCount;
+                const sign = diff > 0 ? '+' : '';
+                saveBtn.title = `Нельзя сохранить: количество строк изменилось (${sign}${diff})`;
+            }
+        }
+
         async function saveData() {
             const filepath = document.getElementById('file-select').value;
             const editorText = document.getElementById('text-editor').value;
 
-            if (!filepath) {
-                alert('Не выбран файл!');
-                return;
-            }
+            if (!filepath) return;
 
             showStatus('Сохранение...');
             const res = await fetch('/save_data', {
@@ -111,7 +143,8 @@ HTML_TEMPLATE = """
                 showStatus('Успешно сохранено!');
                 setTimeout(() => showStatus(''), 3000);
             } else {
-                alert('Ошибка при сохранении!');
+                const errText = await res.text();
+                alert('Ошибка при сохранении: ' + errText);
                 showStatus('Ошибка!');
             }
         }
@@ -120,7 +153,6 @@ HTML_TEMPLATE = """
             document.getElementById('status-msg').textContent = msg;
         }
 
-        // Автозапуск при открытии
         scanFiles();
     </script>
 </body>
@@ -133,9 +165,7 @@ def index():
 
 @app.route('/list_files')
 def list_files():
-    """Сканирует папку и подпапки (например, game/) на наличие .rpy файлов"""
     rpy_files = []
-    # Ищем файлы в текущей папке и во всех подпапках
     for root, dirs, files in os.walk(PROJECT_DIR):
         for file in files:
             if file.endswith('.rpy') and not file.endswith('_updated.rpy'):
@@ -150,7 +180,7 @@ def get_data():
     full_path = os.path.join(PROJECT_DIR, filepath)
 
     if not os.path.exists(full_path):
-        return ""
+        return jsonify({'text': '', 'count': 0})
 
     with open(full_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
@@ -162,7 +192,11 @@ def get_data():
             clean_text = match.group(2).replace('\\"', '"')
             pure_lines.append(clean_text)
 
-    return "\n".join(pure_lines)
+    # Возвращаем и текст, и ИСХОДНОЕ количество текстовых строк
+    return jsonify({
+        'text': "\n".join(pure_lines),
+        'count': len(pure_lines)
+    })
 
 @app.route('/save_data', methods=['POST'])
 def save_data():
@@ -179,6 +213,11 @@ def save_data():
     with open(full_path, 'r', encoding='utf-8') as f:
         rpy_lines = f.readlines()
 
+    # Дополнительная серверная проверка безопасности
+    orig_text_count = sum(1 for line in rpy_lines if TEXT_PATTERN.match(line))
+    if len(edited_lines) != orig_text_count:
+        return f'Количество строк не совпадает! Ожидается: {orig_text_count}, получено: {len(edited_lines)}', 400
+
     output_lines = []
     text_idx = 0
 
@@ -188,13 +227,10 @@ def save_data():
             indent = match.group(1)
             trailing_newline = "\n" if line.endswith('\n') else ""
 
-            if text_idx < len(edited_lines):
-                new_text = edited_lines[text_idx]
-                new_text = new_text.replace('"', '\\"')
-                output_lines.append(f'{indent}"{new_text}"{trailing_newline}')
-                text_idx += 1
-            else:
-                output_lines.append(line)
+            new_text = edited_lines[text_idx]
+            new_text = new_text.replace('"', '\\"')
+            output_lines.append(f'{indent}"{new_text}"{trailing_newline}')
+            text_idx += 1
         else:
             output_lines.append(line)
 
@@ -204,6 +240,5 @@ def save_data():
     return 'OK', 200
 
 if __name__ == '__main__':
-    print("Редактор запущен!")
-    print("Откройте браузер: http://127.0.0.1:5000")
+    print("Редактор запущен! Откройте браузер: http://127.0.0.1:5000")
     app.run(port=5000)
