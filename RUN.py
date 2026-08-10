@@ -16,9 +16,6 @@ def tokenize_words(text):
 
 
 def word_diff_segments(old_text, new_text):
-    """Return a GitHub-style inline diff: a list of {'op': 'equal'|'delete'|'insert', 'text': ...}
-    segments produced by aligning old_text and new_text word-by-word (not just marking the
-    whole line as changed)."""
     old_tokens = tokenize_words(old_text)
     new_tokens = tokenize_words(new_text)
     matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
@@ -56,20 +53,14 @@ HTML_TEMPLATE = """
         .btn-reload { background: #333; }
         .btn-reload:hover { background: #444; }
 
-        .editor-box { position: relative; }
-        textarea { width: 100%; height: 73vh; background: #1e1e1e; color: #9cdcfe; border: 1px solid #3c3c3c; padding: 15px; font-size: 16px; line-height: 26px; border-radius: 8px; box-sizing: border-box; resize: vertical; font-family: inherit; white-space: pre; overflow-x: auto; }
-        textarea:focus { border-color: #007acc; outline: none; }
-
         .info { color: #888; font-size: 13px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
 
-        /* Стили для счетчика */
         .counter-badge { font-weight: bold; padding: 4px 10px; border-radius: 4px; font-size: 13px; }
         .counter-ok { background: #133a1b; color: #4ec9b0; border: 1px solid #256631; }
         .counter-err { background: #4a1515; color: #f48771; border: 1px solid #8a2222; }
 
         .status { color: #4ec9b0; font-weight: bold; margin-left: 10px; }
 
-        /* Batch copy/paste controls */
         .batch-panel { display: flex; align-items: center; gap: 10px; background: #222; padding: 10px 20px; border-radius: 8px; border: 1px solid #333; margin-bottom: 15px; flex-wrap: wrap; }
         .batch-panel label { font-size: 13px; color: #aaa; }
         #batch-size, #start-line { width: 70px; background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 7px 8px; border-radius: 6px; font-size: 14px; }
@@ -83,18 +74,62 @@ HTML_TEMPLATE = """
         #batch-error-msg { font-size: 13px; color: #f48771; font-weight: bold; }
         #batch-error-msg.listening { color: #dcdcaa; }
 
-        /* Git diff split view */
         .btn-diff { background: #5a3d8c; }
         .btn-diff:hover { background: #6b48a8; }
         .btn-diff.active { background: #8859d6; }
 
-        .editor-box.split { display: flex; gap: 10px; }
-        .editor-box.split textarea { width: 50%; flex: 1 1 50%; }
+        /* Unified Split Editor & Diff View Container */
+        .editor-box {
+            display: flex;
+            width: 100%;
+            height: 73vh;
+            background: #1e1e1e;
+            border: 1px solid #3c3c3c;
+            border-radius: 8px;
+            overflow: hidden;
+        }
 
-        .diff-pane { display: none; flex: 1 1 50%; height: 73vh; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; box-sizing: border-box; padding: 15px; font-size: 16px; line-height: 26px; font-family: inherit; white-space: pre; overflow: auto; }
+        /* Полная идентичность параметров шрифта и переносов для синхронности */
+        textarea, .diff-pane {
+            font-family: "Consolas", "Fira Code", "Courier New", monospace;
+            font-size: 14px;
+            line-height: 22px;
+            padding: 15px;
+            box-sizing: border-box;
+            white-space: pre; /* Отключаем обрезку текста, включаем горизонтальный скролл */
+            overflow: auto;
+        }
+
+        textarea {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            color: #9cdcfe;
+            border: none;
+            resize: none;
+        }
+        textarea:focus { outline: none; }
+
+        .editor-box.split textarea {
+            width: 50%;
+            border-right: 1px solid #3c3c3c;
+        }
+
+        .diff-pane {
+            display: none;
+            width: 50%;
+            height: 100%;
+            background: #1e1e1e;
+        }
         .editor-box.split .diff-pane { display: block; }
 
-        .diff-row { white-space: pre; height: 26px; line-height: 26px; font-size: 16px; min-height: 26px; box-sizing: border-box; }
+        /* Строки diff без обрезок и многоточий */
+        .diff-row {
+            min-height: 22px;
+            line-height: 22px;
+            white-space: pre;
+            box-sizing: border-box;
+        }
         .diff-row.diff-changed { background: rgba(255, 255, 255, 0.03); }
         .diff-row.diff-new { color: #6a9955; background: rgba(106, 153, 85, 0.12); font-style: italic; }
         .diff-row.diff-empty { color: transparent; }
@@ -132,7 +167,7 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="editor-box" id="editor-box">
-            <textarea id="text-editor" oninput="validateLines()" placeholder="Выберите .rpy файл из списка выше..."></textarea>
+            <textarea id="text-editor" oninput="validateLines()" wrap="off" placeholder="Выберите .rpy файл из списка выше..."></textarea>
             <div class="diff-pane" id="diff-pane"></div>
         </div>
     </div>
@@ -140,15 +175,13 @@ HTML_TEMPLATE = """
     <script>
         let originalLineCount = 0;
 
-        // --- Batch copy/paste state ---
-        let currentIndex = 0;          // start line (0-based) of active chunk
-        let batchState = 'copy';       // 'copy' | 'paste' | 'done'
-        let activeBatchLineCount = 0;  // number of lines in the currently-copied batch
-        let isListeningForPaste = false; // true while waiting for a native Ctrl+V after clipboard.readText() failed
+        let currentIndex = 0;
+        let batchState = 'copy';
+        let activeBatchLineCount = 0;
+        let isListeningForPaste = false;
 
-        // --- Git diff view state ---
         let diffViewActive = false;
-        let diffData = null;       // array parallel to current lines: null | {type:'changed', old} | {type:'new'}
+        let diffData = null;
         let diffLoadedForFile = null;
         let isSyncingScroll = false;
 
@@ -184,7 +217,6 @@ HTML_TEMPLATE = """
             document.getElementById('text-editor').value = data.text;
             originalLineCount = data.count;
 
-            // Reset batch cursor/state on (re)load
             currentIndex = 0;
             batchState = 'copy';
             activeBatchLineCount = 0;
@@ -193,7 +225,6 @@ HTML_TEMPLATE = """
             updateBatchButton();
             updateChunkStatus();
 
-            // Reset diff view state on (re)load — the diff must be re-fetched for the new file
             diffData = null;
             diffLoadedForFile = null;
             setDiffViewActive(false);
@@ -202,10 +233,8 @@ HTML_TEMPLATE = """
             showStatus('Загружено');
         }
 
-        // Подсчет и валидация строк в реальном времени
         function validateLines() {
             const text = document.getElementById('text-editor').value;
-            // Разбиваем текст по переносам строк
             const currentLines = text ? text.split('\\n').length : 0;
 
             const counterBadge = document.getElementById('line-counter');
@@ -229,11 +258,8 @@ HTML_TEMPLATE = """
 
             if (diffViewActive) {
                 syncDiffPaneRowCount(currentLines);
-                syncRowHeights();
             }
         }
-
-        // ================= Batch Copy/Paste =================
 
         function getBatchSize() {
             const el = document.getElementById('batch-size');
@@ -243,7 +269,6 @@ HTML_TEMPLATE = """
         }
 
         function onBatchSizeChange() {
-            // Changing N mid-flow only affects the *next* batch; just refresh the status label.
             updateChunkStatus();
         }
 
@@ -251,7 +276,7 @@ HTML_TEMPLATE = """
             const el = document.getElementById('start-line');
             let val = parseInt(el.value, 10);
             const total = getEditorLines().length;
-            
+
             if (isNaN(val) || val < 1) {
                 val = 1;
             } else if (val > total && total > 0) {
@@ -264,7 +289,7 @@ HTML_TEMPLATE = """
             activeBatchLineCount = 0;
             stopPasteListening();
             clearBatchError();
-            
+
             updateBatchButton();
             updateChunkStatus();
         }
@@ -290,7 +315,6 @@ HTML_TEMPLATE = """
                 return;
             }
 
-            // Sync start-line input value to currentIndex + 1
             const startLineEl = document.getElementById('start-line');
             if (startLineEl && document.activeElement !== startLineEl) {
                 startLineEl.value = currentIndex + 1;
@@ -345,19 +369,18 @@ HTML_TEMPLATE = """
         }
 
         function highlightBatchInEditor(startLine, endLine) {
-            // Select the corresponding text range in the textarea (best-effort, char offsets)
             const textarea = document.getElementById('text-editor');
             const lines = getEditorLines();
 
             let startChar = 0;
             for (let i = 0; i < startLine; i++) {
-                startChar += lines[i].length + 1; // +1 for the newline
+                startChar += lines[i].length + 1;
             }
             let endChar = startChar;
             for (let i = startLine; i < endLine; i++) {
                 endChar += lines[i].length + 1;
             }
-            endChar = Math.min(endChar - 1, textarea.value.length); // trim trailing newline
+            endChar = Math.min(endChar - 1, textarea.value.length);
 
             const savedScrollTop = textarea.scrollTop;
             textarea.focus();
@@ -378,7 +401,7 @@ HTML_TEMPLATE = """
             }
 
             const n = getBatchSize();
-            const end = Math.min(currentIndex + n, total); // handles end-of-file gracefully
+            const end = Math.min(currentIndex + n, total);
             const chunkLines = lines.slice(currentIndex, end);
             const chunkText = chunkLines.join('\\n');
 
@@ -405,10 +428,6 @@ HTML_TEMPLATE = """
                 const clipboardText = await navigator.clipboard.readText();
                 applyPastedBatch(clipboardText);
             } catch (err) {
-                // Permission denied / unsupported (e.g. non-HTTPS, or the site hasn't
-                // been granted clipboard-read permission). Stay on this same page and
-                // just listen for the user's next native Ctrl+V / Cmd+V instead of
-                // opening any separate window or dialog.
                 startPasteListening();
             }
         }
@@ -452,7 +471,6 @@ HTML_TEMPLATE = """
                 showBatchError(
                     `Несовпадение количества строк: ожидалось ${activeBatchLineCount}, получено ${pastedLines.length}`
                 );
-                // Stay in 'paste' state so the user can fix the clipboard and retry
                 batchState = 'paste';
                 updateBatchButton();
                 return;
@@ -486,10 +504,6 @@ HTML_TEMPLATE = """
             updateChunkStatus();
         }
 
-        // ================= End Batch Copy/Paste =================
-
-        // ================= Git Diff View =================
-
         function setDiffViewActive(active) {
             diffViewActive = active;
             const editorBox = document.getElementById('editor-box');
@@ -522,7 +536,6 @@ HTML_TEMPLATE = """
 
             if (diffViewActive) {
                 renderDiffPane();
-                syncRowHeights();
             }
         }
 
@@ -535,7 +548,6 @@ HTML_TEMPLATE = """
                 return;
             }
 
-            // Need fresh diff data if we haven't loaded it for this file yet
             if (diffLoadedForFile !== filepath) {
                 const diffPane = document.getElementById('diff-pane');
                 diffPane.innerHTML = '<div class="diff-status-msg">Загрузка git diff...</div>';
@@ -545,7 +557,6 @@ HTML_TEMPLATE = """
             } else {
                 setDiffViewActive(true);
                 renderDiffPane();
-                syncRowHeights();
             }
 
             setupScrollSync();
@@ -600,8 +611,6 @@ HTML_TEMPLATE = """
             return row;
         }
 
-        // Keep the diff pane's row count matching the editor's current line count
-        // (e.g. while the user is mid-edit and briefly has an unequal count).
         function syncDiffPaneRowCount(targetCount) {
             const diffPane = document.getElementById('diff-pane');
             const current = diffPane.children.length;
@@ -629,10 +638,12 @@ HTML_TEMPLATE = """
             const editor = document.getElementById('text-editor');
             const diffPane = document.getElementById('diff-pane');
 
+            // Синхронизация по обоим осям (X и Y)
             editor.addEventListener('scroll', () => {
                 if (isSyncingScroll || !diffViewActive) return;
                 isSyncingScroll = true;
                 diffPane.scrollTop = editor.scrollTop;
+                diffPane.scrollLeft = editor.scrollLeft;
                 isSyncingScroll = false;
             });
 
@@ -640,70 +651,10 @@ HTML_TEMPLATE = """
                 if (isSyncingScroll || !diffViewActive) return;
                 isSyncingScroll = true;
                 editor.scrollTop = diffPane.scrollTop;
+                editor.scrollLeft = diffPane.scrollLeft;
                 isSyncingScroll = false;
             });
         }
-
-        function syncRowHeights() {
-            if (!diffViewActive) return;
-
-            const textarea = document.getElementById('text-editor');
-            const lines = getEditorLines();
-            const diffPane = document.getElementById('diff-pane');
-            const rows = diffPane.getElementsByClassName('diff-row');
-
-            if (rows.length !== lines.length) return;
-
-            const computedStyle = window.getComputedStyle(textarea);
-            
-            let mirror = document.getElementById('textarea-mirror');
-            if (!mirror) {
-                mirror = document.createElement('div');
-                mirror.id = 'textarea-mirror';
-                mirror.style.position = 'absolute';
-                mirror.style.visibility = 'hidden';
-                mirror.style.top = '-9999px';
-                mirror.style.left = '-9999px';
-                mirror.style.boxSizing = 'border-box';
-                document.body.appendChild(mirror);
-            }
-
-            // Set mirror width and horizontal padding to match textarea inner content width
-            mirror.style.width = textarea.clientWidth + 'px';
-            mirror.style.paddingLeft = computedStyle.paddingLeft;
-            mirror.style.paddingRight = computedStyle.paddingRight;
-            mirror.style.fontFamily = computedStyle.fontFamily;
-            mirror.style.fontSize = computedStyle.fontSize;
-            mirror.style.lineHeight = computedStyle.lineHeight;
-
-            // Clear and build mirror children
-            mirror.innerHTML = '';
-            const fragment = document.createDocumentFragment();
-            for (let i = 0; i < lines.length; i++) {
-                const item = document.createElement('div');
-                item.style.whiteSpace = 'pre-wrap';
-                item.style.wordBreak = 'break-word';
-                item.textContent = lines[i] || '\u00A0';
-                fragment.appendChild(item);
-            }
-            mirror.appendChild(fragment);
-
-            // Read heights and apply to diff rows as minHeight
-            const children = mirror.children;
-            for (let i = 0; i < lines.length; i++) {
-                const height = children[i].offsetHeight;
-                const row = rows[i];
-                if (row) {
-                    row.style.minHeight = height + 'px';
-                    row.style.height = '';
-                    row.style.boxSizing = 'border-box';
-                }
-            }
-        }
-
-        window.addEventListener('resize', syncRowHeights);
-
-        // ================= End Git Diff View =================
 
         async function saveData() {
             const filepath = document.getElementById('file-select').value;
@@ -720,8 +671,7 @@ HTML_TEMPLATE = """
 
             if (res.ok) {
                 showStatus('Успешно сохранено!');
-                
-                // If diff view is active or we have loaded diff for this file, refresh it
+
                 if (diffViewActive || diffLoadedForFile === filepath) {
                     await refreshDiffData(filepath);
                 }
@@ -777,7 +727,6 @@ def get_data():
             clean_text = match.group(2).replace('\\"', '"')
             pure_lines.append(clean_text)
 
-    # Возвращаем и текст, и ИСХОДНОЕ количество текстовых строк
     return jsonify({
         'text': "\n".join(pure_lines),
         'count': len(pure_lines)
@@ -785,7 +734,6 @@ def get_data():
 
 
 def extract_pure_lines(raw_text):
-    """Extract translatable text lines the same way get_data does, from raw file content."""
     pure_lines = []
     for line in raw_text.splitlines():
         match = TEXT_PATTERN.match(line)
@@ -807,11 +755,7 @@ def is_inside_git_repo():
 
 
 def get_git_head_text(relpath):
-    """Return (content, error) for the HEAD-committed version of relpath."""
     try:
-        # Git expects paths relative to the repository root when queried with HEAD:<path>,
-        # but supports HEAD:./<path> to query relative to the current working directory.
-        # We replace backslashes with forward slashes for Git path compatibility.
         normalized_path = relpath.replace('\\', '/')
         if not normalized_path.startswith('./'):
             normalized_path = './' + normalized_path
@@ -851,8 +795,6 @@ def get_diff():
     head_pure = extract_pure_lines(head_content)
     current_pure = extract_pure_lines(current_content)
 
-    # Align HEAD lines to current (working-tree) lines and figure out, for each
-    # CURRENT line, whether it's unchanged, changed (with the old HEAD text), or new.
     matcher = difflib.SequenceMatcher(None, head_pure, current_pure, autojunk=False)
     diff_result = [None] * len(current_pure)
 
@@ -875,8 +817,6 @@ def get_diff():
                     }
                 else:
                     diff_result[j1 + k] = {'type': 'new'}
-        # 'delete' opcodes remove HEAD-only lines that have no counterpart
-        # in the current file, so there is no current row to attach them to.
 
     return jsonify({'available': True, 'diff': diff_result, 'count': len(current_pure)})
 
@@ -895,7 +835,6 @@ def save_data():
     with open(full_path, 'r', encoding='utf-8') as f:
         rpy_lines = f.readlines()
 
-    # Дополнительная серверная проверка безопасности
     orig_text_count = sum(1 for line in rpy_lines if TEXT_PATTERN.match(line))
     if len(edited_lines) != orig_text_count:
         return f'Количество строк не совпадает! Ожидается: {orig_text_count}, получено: {len(edited_lines)}', 400
