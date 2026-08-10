@@ -39,6 +39,20 @@ HTML_TEMPLATE = """
         .counter-err { background: #4a1515; color: #f48771; border: 1px solid #8a2222; }
 
         .status { color: #4ec9b0; font-weight: bold; margin-left: 10px; }
+
+        /* Batch copy/paste controls */
+        .batch-panel { display: flex; align-items: center; gap: 10px; background: #222; padding: 10px 20px; border-radius: 8px; border: 1px solid #333; margin-bottom: 15px; flex-wrap: wrap; }
+        .batch-panel label { font-size: 13px; color: #aaa; }
+        #batch-size { width: 70px; background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 7px 8px; border-radius: 6px; font-size: 14px; }
+        #batch-size:focus { border-color: #007acc; outline: none; }
+        #batch-action-btn { background: #2d7d46; }
+        #batch-action-btn:hover { background: #35914f; }
+        #batch-action-btn.state-paste { background: #b4740e; }
+        #batch-action-btn.state-paste:hover { background: #cf8412; }
+        #batch-action-btn.state-done { background: #444; }
+        #chunk-status { font-size: 13px; color: #9cdcfe; font-weight: bold; margin-left: auto; }
+        #batch-error-msg { font-size: 13px; color: #f48771; font-weight: bold; }
+        #batch-error-msg.listening { color: #dcdcaa; }
     </style>
 </head>
 <body>
@@ -50,6 +64,13 @@ HTML_TEMPLATE = """
                 <button class="btn-reload" onclick="scanFiles()" title="Обновить список файлов">🔄</button>
             </div>
             <button id="save-btn" onclick="saveData()">Сохранить изменения</button>
+        </div>
+        <div class="batch-panel">
+            <label for="batch-size">Строк за раз (N):</label>
+            <input type="number" id="batch-size" value="100" min="1" step="1" onchange="onBatchSizeChange()">
+            <button id="batch-action-btn" onclick="handleBatchAction()">Копировать блок</button>
+            <span id="batch-error-msg"></span>
+            <span id="chunk-status">Блок: - / 0</span>
         </div>
         <div class="info">
             <span>* Одна строка = одна реплика. Изменение количества строк заблокировано.</span>
@@ -65,6 +86,12 @@ HTML_TEMPLATE = """
 
     <script>
         let originalLineCount = 0;
+
+        // --- Batch copy/paste state ---
+        let currentIndex = 0;          // start line (0-based) of active chunk
+        let batchState = 'copy';       // 'copy' | 'paste' | 'done'
+        let activeBatchLineCount = 0;  // number of lines in the currently-copied batch
+        let isListeningForPaste = false; // true while waiting for a native Ctrl+V after clipboard.readText() failed
 
         async function scanFiles() {
             const res = await fetch('/list_files');
@@ -98,6 +125,15 @@ HTML_TEMPLATE = """
             document.getElementById('text-editor').value = data.text;
             originalLineCount = data.count;
 
+            // Reset batch cursor/state on (re)load
+            currentIndex = 0;
+            batchState = 'copy';
+            activeBatchLineCount = 0;
+            stopPasteListening();
+            clearBatchError();
+            updateBatchButton();
+            updateChunkStatus();
+
             validateLines();
             showStatus('Загружено');
         }
@@ -124,7 +160,233 @@ HTML_TEMPLATE = """
                 const sign = diff > 0 ? '+' : '';
                 saveBtn.title = `Нельзя сохранить: количество строк изменилось (${sign}${diff})`;
             }
+
+            updateChunkStatus();
         }
+
+        // ================= Batch Copy/Paste =================
+
+        function getBatchSize() {
+            const el = document.getElementById('batch-size');
+            let n = parseInt(el.value, 10);
+            if (!n || n < 1) n = 100;
+            return n;
+        }
+
+        function onBatchSizeChange() {
+            // Changing N mid-flow only affects the *next* batch; just refresh the status label.
+            updateChunkStatus();
+        }
+
+        function getEditorLines() {
+            const text = document.getElementById('text-editor').value;
+            return text.length ? text.split('\\n') : [];
+        }
+
+        function clearBatchError() {
+            document.getElementById('batch-error-msg').textContent = '';
+        }
+
+        function showBatchError(msg) {
+            document.getElementById('batch-error-msg').textContent = msg;
+        }
+
+        function updateChunkStatus() {
+            const total = getEditorLines().length;
+            const statusEl = document.getElementById('chunk-status');
+            if (total === 0) {
+                statusEl.textContent = 'Блок: - / 0';
+                return;
+            }
+            if (currentIndex >= total) {
+                statusEl.textContent = `Блок: завершено / ${total}`;
+                return;
+            }
+            const n = getBatchSize();
+            const end = Math.min(currentIndex + n, total);
+            statusEl.textContent = `Блок: ${currentIndex + 1}-${end} / ${total}`;
+        }
+
+        function updateBatchButton() {
+            const btn = document.getElementById('batch-action-btn');
+            btn.classList.remove('state-paste', 'state-done');
+
+            const total = getEditorLines().length;
+            if (total === 0) {
+                btn.textContent = 'Копировать блок';
+                btn.disabled = true;
+                return;
+            }
+            btn.disabled = false;
+
+            if (batchState === 'copy') {
+                if (currentIndex >= total) {
+                    batchState = 'done';
+                    btn.textContent = 'Завершено';
+                    btn.classList.add('state-done');
+                    btn.disabled = true;
+                } else {
+                    btn.textContent = 'Копировать блок';
+                }
+            } else if (batchState === 'paste') {
+                btn.textContent = 'Вставить блок';
+                btn.classList.add('state-paste');
+            } else if (batchState === 'done') {
+                btn.textContent = 'Завершено';
+                btn.classList.add('state-done');
+                btn.disabled = true;
+            }
+        }
+
+        function handleBatchAction() {
+            if (batchState === 'copy') {
+                copyBatch();
+            } else if (batchState === 'paste') {
+                pasteBatch();
+            }
+        }
+
+        function highlightBatchInEditor(startLine, endLine) {
+            // Select the corresponding text range in the textarea (best-effort, char offsets)
+            const textarea = document.getElementById('text-editor');
+            const lines = getEditorLines();
+
+            let startChar = 0;
+            for (let i = 0; i < startLine; i++) {
+                startChar += lines[i].length + 1; // +1 for the newline
+            }
+            let endChar = startChar;
+            for (let i = startLine; i < endLine; i++) {
+                endChar += lines[i].length + 1;
+            }
+            endChar = Math.min(endChar - 1, textarea.value.length); // trim trailing newline
+
+            textarea.focus();
+            textarea.setSelectionRange(startChar, Math.max(startChar, endChar));
+        }
+
+        async function copyBatch() {
+            clearBatchError();
+            const lines = getEditorLines();
+            const total = lines.length;
+
+            if (currentIndex >= total) {
+                batchState = 'done';
+                updateBatchButton();
+                updateChunkStatus();
+                return;
+            }
+
+            const n = getBatchSize();
+            const end = Math.min(currentIndex + n, total); // handles end-of-file gracefully
+            const chunkLines = lines.slice(currentIndex, end);
+            const chunkText = chunkLines.join('\\n');
+
+            try {
+                await navigator.clipboard.writeText(chunkText);
+            } catch (err) {
+                showBatchError('Не удалось скопировать в буфер обмена: ' + err.message);
+                return;
+            }
+
+            activeBatchLineCount = chunkLines.length;
+            highlightBatchInEditor(currentIndex, end);
+            showStatus(`Скопировано строк ${currentIndex + 1}-${end}`);
+
+            batchState = 'paste';
+            updateBatchButton();
+            updateChunkStatus();
+        }
+
+        async function pasteBatch() {
+            clearBatchError();
+
+            try {
+                const clipboardText = await navigator.clipboard.readText();
+                applyPastedBatch(clipboardText);
+            } catch (err) {
+                // Permission denied / unsupported (e.g. non-HTTPS, or the site hasn't
+                // been granted clipboard-read permission). Stay on this same page and
+                // just listen for the user's next native Ctrl+V / Cmd+V instead of
+                // opening any separate window or dialog.
+                startPasteListening();
+            }
+        }
+
+        function startPasteListening() {
+            if (isListeningForPaste) return;
+            isListeningForPaste = true;
+            document.addEventListener('paste', handleGlobalPaste);
+            document.addEventListener('keydown', handlePasteListenKeydown);
+            const errEl = document.getElementById('batch-error-msg');
+            errEl.classList.add('listening');
+            errEl.textContent = 'Нажмите Ctrl+V (или Cmd+V), чтобы вставить блок... (Esc — отмена)';
+        }
+
+        function stopPasteListening() {
+            isListeningForPaste = false;
+            document.removeEventListener('paste', handleGlobalPaste);
+            document.removeEventListener('keydown', handlePasteListenKeydown);
+            document.getElementById('batch-error-msg').classList.remove('listening');
+        }
+
+        function handleGlobalPaste(e) {
+            e.preventDefault();
+            const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+            stopPasteListening();
+            clearBatchError();
+            applyPastedBatch(text);
+        }
+
+        function handlePasteListenKeydown(e) {
+            if (e.key === 'Escape') {
+                stopPasteListening();
+                showBatchError('Вставка отменена.');
+            }
+        }
+
+        function applyPastedBatch(clipboardText) {
+            const pastedLines = clipboardText.length ? clipboardText.split(/\\r\\n|\\r|\\n/) : [];
+
+            if (pastedLines.length !== activeBatchLineCount) {
+                showBatchError(
+                    `Несовпадение количества строк: ожидалось ${activeBatchLineCount}, получено ${pastedLines.length}`
+                );
+                // Stay in 'paste' state so the user can fix the clipboard and retry
+                batchState = 'paste';
+                updateBatchButton();
+                return;
+            }
+
+            const lines = getEditorLines();
+            const total = lines.length;
+            const end = Math.min(currentIndex + activeBatchLineCount, total);
+
+            const newLines = lines.slice(0, currentIndex)
+                .concat(pastedLines)
+                .concat(lines.slice(end));
+
+            const textarea = document.getElementById('text-editor');
+            textarea.value = newLines.join('\\n');
+
+            currentIndex = end;
+            activeBatchLineCount = 0;
+            clearBatchError();
+            validateLines();
+
+            if (currentIndex >= newLines.length) {
+                batchState = 'done';
+                showStatus('Все блоки обработаны!');
+            } else {
+                batchState = 'copy';
+                showStatus('Блок вставлен');
+            }
+
+            updateBatchButton();
+            updateChunkStatus();
+        }
+
+        // ================= End Batch Copy/Paste =================
 
         async function saveData() {
             const filepath = document.getElementById('file-select').value;
