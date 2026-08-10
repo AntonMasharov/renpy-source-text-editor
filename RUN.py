@@ -699,8 +699,15 @@ def is_inside_git_repo():
 def get_git_head_text(relpath):
     """Return (content, error) for the HEAD-committed version of relpath."""
     try:
+        # Git expects paths relative to the repository root when queried with HEAD:<path>,
+        # but supports HEAD:./<path> to query relative to the current working directory.
+        # We replace backslashes with forward slashes for Git path compatibility.
+        normalized_path = relpath.replace('\\', '/')
+        if not normalized_path.startswith('./'):
+            normalized_path = './' + normalized_path
+
         result = subprocess.run(
-            ['git', 'show', f'HEAD:{relpath}'],
+            ['git', 'show', f'HEAD:{normalized_path}'],
             cwd=PROJECT_DIR, capture_output=True, text=True,
             encoding='utf-8', errors='replace', timeout=10
         )
