@@ -1,11 +1,40 @@
 from flask import Flask, render_template_string, request, jsonify
 import re
 import os
+import subprocess
+import difflib
 
 app = Flask(__name__)
 
 PROJECT_DIR = os.getcwd()
 TEXT_PATTERN = re.compile(r'^(\s*)"([^"\\]*(?:\\.[^"\\]*)*)"(\s*)$')
+WORD_TOKEN_PATTERN = re.compile(r'\w+|[^\w\s]|\s+', re.UNICODE)
+
+
+def tokenize_words(text):
+    return WORD_TOKEN_PATTERN.findall(text)
+
+
+def word_diff_segments(old_text, new_text):
+    """Return a GitHub-style inline diff: a list of {'op': 'equal'|'delete'|'insert', 'text': ...}
+    segments produced by aligning old_text and new_text word-by-word (not just marking the
+    whole line as changed)."""
+    old_tokens = tokenize_words(old_text)
+    new_tokens = tokenize_words(new_text)
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
+
+    segments = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            segments.append({'op': 'equal', 'text': ''.join(old_tokens[i1:i2])})
+        elif tag == 'delete':
+            segments.append({'op': 'delete', 'text': ''.join(old_tokens[i1:i2])})
+        elif tag == 'insert':
+            segments.append({'op': 'insert', 'text': ''.join(new_tokens[j1:j2])})
+        elif tag == 'replace':
+            segments.append({'op': 'delete', 'text': ''.join(old_tokens[i1:i2])})
+            segments.append({'op': 'insert', 'text': ''.join(new_tokens[j1:j2])})
+    return segments
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -53,6 +82,26 @@ HTML_TEMPLATE = """
         #chunk-status { font-size: 13px; color: #9cdcfe; font-weight: bold; margin-left: auto; }
         #batch-error-msg { font-size: 13px; color: #f48771; font-weight: bold; }
         #batch-error-msg.listening { color: #dcdcaa; }
+
+        /* Git diff split view */
+        .btn-diff { background: #5a3d8c; }
+        .btn-diff:hover { background: #6b48a8; }
+        .btn-diff.active { background: #8859d6; }
+
+        .editor-box.split { display: flex; gap: 10px; }
+        .editor-box.split textarea { width: 50%; flex: 1 1 50%; }
+
+        .diff-pane { display: none; flex: 1 1 50%; height: 73vh; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; box-sizing: border-box; padding: 15px; font-size: 16px; line-height: 1.6; font-family: inherit; white-space: pre; overflow: auto; }
+        .editor-box.split .diff-pane { display: block; }
+
+        .diff-row { white-space: pre; min-height: 1.6em; }
+        .diff-row.diff-changed { background: rgba(255, 255, 255, 0.03); }
+        .diff-row.diff-new { color: #6a9955; background: rgba(106, 153, 85, 0.12); font-style: italic; }
+        .diff-row.diff-empty { color: transparent; }
+        .diff-seg-equal { color: #999; }
+        .diff-seg-delete { color: #f48771; background: rgba(244, 135, 113, 0.18); text-decoration: line-through; text-decoration-color: rgba(244, 135, 113, 0.75); border-radius: 2px; }
+        .diff-seg-insert { color: #6a9955; background: rgba(106, 153, 85, 0.2); border-radius: 2px; }
+        .diff-status-msg { color: #888; font-style: italic; }
     </style>
 </head>
 <body>
@@ -64,6 +113,7 @@ HTML_TEMPLATE = """
                 <button class="btn-reload" onclick="scanFiles()" title="Обновить список файлов">🔄</button>
             </div>
             <button id="save-btn" onclick="saveData()">Сохранить изменения</button>
+            <button id="diff-toggle-btn" class="btn-diff" onclick="toggleDiffView()">🔀 Git Diff</button>
         </div>
         <div class="batch-panel">
             <label for="batch-size">Строк за раз (N):</label>
@@ -79,8 +129,9 @@ HTML_TEMPLATE = """
                 <span id="status-msg" class="status"></span>
             </div>
         </div>
-        <div class="editor-box">
+        <div class="editor-box" id="editor-box">
             <textarea id="text-editor" oninput="validateLines()" placeholder="Выберите .rpy файл из списка выше..."></textarea>
+            <div class="diff-pane" id="diff-pane"></div>
         </div>
     </div>
 
@@ -92,6 +143,12 @@ HTML_TEMPLATE = """
         let batchState = 'copy';       // 'copy' | 'paste' | 'done'
         let activeBatchLineCount = 0;  // number of lines in the currently-copied batch
         let isListeningForPaste = false; // true while waiting for a native Ctrl+V after clipboard.readText() failed
+
+        // --- Git diff view state ---
+        let diffViewActive = false;
+        let diffData = null;       // array parallel to current lines: null | {type:'changed', old} | {type:'new'}
+        let diffLoadedForFile = null;
+        let isSyncingScroll = false;
 
         async function scanFiles() {
             const res = await fetch('/list_files');
@@ -134,6 +191,11 @@ HTML_TEMPLATE = """
             updateBatchButton();
             updateChunkStatus();
 
+            // Reset diff view state on (re)load — the diff must be re-fetched for the new file
+            diffData = null;
+            diffLoadedForFile = null;
+            setDiffViewActive(false);
+
             validateLines();
             showStatus('Загружено');
         }
@@ -162,6 +224,10 @@ HTML_TEMPLATE = """
             }
 
             updateChunkStatus();
+
+            if (diffViewActive) {
+                syncDiffPaneRowCount(currentLines);
+            }
         }
 
         // ================= Batch Copy/Paste =================
@@ -388,6 +454,153 @@ HTML_TEMPLATE = """
 
         // ================= End Batch Copy/Paste =================
 
+        // ================= Git Diff View =================
+
+        function setDiffViewActive(active) {
+            diffViewActive = active;
+            const editorBox = document.getElementById('editor-box');
+            const btn = document.getElementById('diff-toggle-btn');
+            if (active) {
+                editorBox.classList.add('split');
+                btn.classList.add('active');
+                btn.textContent = '✖ Скрыть Diff';
+            } else {
+                editorBox.classList.remove('split');
+                btn.classList.remove('active');
+                btn.textContent = '🔀 Git Diff';
+            }
+        }
+
+        async function toggleDiffView() {
+            const filepath = document.getElementById('file-select').value;
+            if (!filepath) return;
+
+            if (diffViewActive) {
+                setDiffViewActive(false);
+                return;
+            }
+
+            // Need fresh diff data if we haven't loaded it for this file yet
+            if (diffLoadedForFile !== filepath) {
+                const diffPane = document.getElementById('diff-pane');
+                diffPane.innerHTML = '<div class="diff-status-msg">Загрузка git diff...</div>';
+                setDiffViewActive(true);
+
+                const res = await fetch(`/get_diff?file=${encodeURIComponent(filepath)}`);
+                const result = await res.json();
+
+                if (!result.available) {
+                    diffPane.innerHTML = `<div class="diff-status-msg">Git diff недоступен: ${escapeHtml(result.reason || 'неизвестная причина')}</div>`;
+                    diffData = null;
+                    diffLoadedForFile = null;
+                    return;
+                }
+
+                diffData = result.diff;
+                diffLoadedForFile = filepath;
+            } else {
+                setDiffViewActive(true);
+            }
+
+            renderDiffPane();
+            setupScrollSync();
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function renderDiffPane() {
+            const diffPane = document.getElementById('diff-pane');
+            const lineCount = getEditorLines().length;
+            diffPane.innerHTML = '';
+
+            if (!diffData) return;
+
+            const frag = document.createDocumentFragment();
+            for (let i = 0; i < lineCount; i++) {
+                frag.appendChild(buildDiffRow(diffData[i]));
+            }
+            diffPane.appendChild(frag);
+        }
+
+        function buildDiffRow(entry) {
+            const row = document.createElement('div');
+            row.className = 'diff-row';
+
+            if (!entry) {
+                row.classList.add('diff-empty');
+                row.textContent = '\u00A0';
+            } else if (entry.type === 'changed') {
+                row.classList.add('diff-changed');
+                if (entry.segments && entry.segments.length) {
+                    entry.segments.forEach(seg => {
+                        const span = document.createElement('span');
+                        span.className = 'diff-seg-' + seg.op;
+                        span.textContent = seg.text;
+                        row.appendChild(span);
+                    });
+                } else {
+                    row.textContent = '\u00A0';
+                }
+            } else if (entry.type === 'new') {
+                row.classList.add('diff-new');
+                row.textContent = '(новая строка)';
+            } else {
+                row.classList.add('diff-empty');
+                row.textContent = '\u00A0';
+            }
+            return row;
+        }
+
+        // Keep the diff pane's row count matching the editor's current line count
+        // (e.g. while the user is mid-edit and briefly has an unequal count).
+        function syncDiffPaneRowCount(targetCount) {
+            const diffPane = document.getElementById('diff-pane');
+            const current = diffPane.children.length;
+
+            if (current === targetCount) return;
+
+            if (current < targetCount) {
+                const frag = document.createDocumentFragment();
+                for (let i = current; i < targetCount; i++) {
+                    frag.appendChild(buildDiffRow(diffData ? diffData[i] : null));
+                }
+                diffPane.appendChild(frag);
+            } else {
+                for (let i = current - 1; i >= targetCount; i--) {
+                    diffPane.removeChild(diffPane.children[i]);
+                }
+            }
+        }
+
+        let scrollSyncInitialized = false;
+        function setupScrollSync() {
+            if (scrollSyncInitialized) return;
+            scrollSyncInitialized = true;
+
+            const editor = document.getElementById('text-editor');
+            const diffPane = document.getElementById('diff-pane');
+
+            editor.addEventListener('scroll', () => {
+                if (isSyncingScroll || !diffViewActive) return;
+                isSyncingScroll = true;
+                diffPane.scrollTop = editor.scrollTop;
+                isSyncingScroll = false;
+            });
+
+            diffPane.addEventListener('scroll', () => {
+                if (isSyncingScroll || !diffViewActive) return;
+                isSyncingScroll = true;
+                editor.scrollTop = diffPane.scrollTop;
+                isSyncingScroll = false;
+            });
+        }
+
+        // ================= End Git Diff View =================
+
         async function saveData() {
             const filepath = document.getElementById('file-select').value;
             const editorText = document.getElementById('text-editor').value;
@@ -459,6 +672,96 @@ def get_data():
         'text': "\n".join(pure_lines),
         'count': len(pure_lines)
     })
+
+
+def extract_pure_lines(raw_text):
+    """Extract translatable text lines the same way get_data does, from raw file content."""
+    pure_lines = []
+    for line in raw_text.splitlines():
+        match = TEXT_PATTERN.match(line)
+        if match:
+            clean_text = match.group(2).replace('\\"', '"')
+            pure_lines.append(clean_text)
+    return pure_lines
+
+
+def is_inside_git_repo():
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--is-inside-work-tree'],
+            cwd=PROJECT_DIR, capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+
+
+def get_git_head_text(relpath):
+    """Return (content, error) for the HEAD-committed version of relpath."""
+    try:
+        result = subprocess.run(
+            ['git', 'show', f'HEAD:{relpath}'],
+            cwd=PROJECT_DIR, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=10
+        )
+        if result.returncode != 0:
+            return None, (result.stderr or 'Файл не найден в последнем коммите (HEAD)').strip()
+        return result.stdout, None
+    except FileNotFoundError:
+        return None, 'Git не установлен или недоступен в PATH'
+    except subprocess.SubprocessError as e:
+        return None, str(e)
+
+
+@app.route('/get_diff')
+def get_diff():
+    filepath = request.args.get('file', '')
+    full_path = os.path.join(PROJECT_DIR, filepath)
+
+    if not os.path.exists(full_path):
+        return jsonify({'available': False, 'reason': 'Файл не найден'})
+
+    if not is_inside_git_repo():
+        return jsonify({'available': False, 'reason': 'Папка проекта не является git-репозиторием'})
+
+    head_content, err = get_git_head_text(filepath)
+    if head_content is None:
+        return jsonify({'available': False, 'reason': err})
+
+    with open(full_path, 'r', encoding='utf-8') as f:
+        current_content = f.read()
+
+    head_pure = extract_pure_lines(head_content)
+    current_pure = extract_pure_lines(current_content)
+
+    # Align HEAD lines to current (working-tree) lines and figure out, for each
+    # CURRENT line, whether it's unchanged, changed (with the old HEAD text), or new.
+    matcher = difflib.SequenceMatcher(None, head_pure, current_pure, autojunk=False)
+    diff_result = [None] * len(current_pure)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            continue
+        elif tag == 'insert':
+            for j in range(j1, j2):
+                diff_result[j] = {'type': 'new'}
+        elif tag == 'replace':
+            old_slice = head_pure[i1:i2]
+            new_count = j2 - j1
+            for k in range(new_count):
+                if k < len(old_slice):
+                    old_text = old_slice[k]
+                    new_text = current_pure[j1 + k]
+                    diff_result[j1 + k] = {
+                        'type': 'changed',
+                        'segments': word_diff_segments(old_text, new_text)
+                    }
+                else:
+                    diff_result[j1 + k] = {'type': 'new'}
+        # 'delete' opcodes remove HEAD-only lines that have no counterpart
+        # in the current file, so there is no current row to attach them to.
+
+    return jsonify({'available': True, 'diff': diff_result, 'count': len(current_pure)})
 
 @app.route('/save_data', methods=['POST'])
 def save_data():
