@@ -43,7 +43,7 @@ HTML_TEMPLATE = """
     <title>Редактор сценариев Ren'Py</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #181818; color: #d4d4d4; padding: 20px; margin: 0; }
-        .container { max-width: 1000px; margin: 0 auto; }
+        .container { width: 100%; max-width: none; padding: 0 20px; box-sizing: border-box; margin: 0; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; background: #222; padding: 15px 20px; border-radius: 8px; border: 1px solid #333; gap: 15px; }
         .controls { display: flex; align-items: center; gap: 10px; flex-grow: 1; }
         select { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 8px 12px; border-radius: 6px; font-size: 14px; flex-grow: 1; max-width: 400px; cursor: pointer; }
@@ -57,7 +57,7 @@ HTML_TEMPLATE = """
         .btn-reload:hover { background: #444; }
 
         .editor-box { position: relative; }
-        textarea { width: 100%; height: 73vh; background: #1e1e1e; color: #9cdcfe; border: 1px solid #3c3c3c; padding: 15px; font-size: 16px; line-height: 1.6; border-radius: 8px; box-sizing: border-box; resize: vertical; font-family: inherit; white-space: pre; }
+        textarea { width: 100%; height: 73vh; background: #1e1e1e; color: #9cdcfe; border: 1px solid #3c3c3c; padding: 15px; font-size: 16px; line-height: 26px; border-radius: 8px; box-sizing: border-box; resize: vertical; font-family: inherit; white-space: pre; overflow-x: auto; }
         textarea:focus { border-color: #007acc; outline: none; }
 
         .info { color: #888; font-size: 13px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
@@ -72,8 +72,8 @@ HTML_TEMPLATE = """
         /* Batch copy/paste controls */
         .batch-panel { display: flex; align-items: center; gap: 10px; background: #222; padding: 10px 20px; border-radius: 8px; border: 1px solid #333; margin-bottom: 15px; flex-wrap: wrap; }
         .batch-panel label { font-size: 13px; color: #aaa; }
-        #batch-size { width: 70px; background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 7px 8px; border-radius: 6px; font-size: 14px; }
-        #batch-size:focus { border-color: #007acc; outline: none; }
+        #batch-size, #start-line { width: 70px; background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 7px 8px; border-radius: 6px; font-size: 14px; }
+        #batch-size:focus, #start-line:focus { border-color: #007acc; outline: none; }
         #batch-action-btn { background: #2d7d46; }
         #batch-action-btn:hover { background: #35914f; }
         #batch-action-btn.state-paste { background: #b4740e; }
@@ -91,10 +91,10 @@ HTML_TEMPLATE = """
         .editor-box.split { display: flex; gap: 10px; }
         .editor-box.split textarea { width: 50%; flex: 1 1 50%; }
 
-        .diff-pane { display: none; flex: 1 1 50%; height: 73vh; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; box-sizing: border-box; padding: 15px; font-size: 16px; line-height: 1.6; font-family: inherit; white-space: pre; overflow: auto; }
+        .diff-pane { display: none; flex: 1 1 50%; height: 73vh; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; box-sizing: border-box; padding: 15px; font-size: 16px; line-height: 26px; font-family: inherit; white-space: pre; overflow: auto; }
         .editor-box.split .diff-pane { display: block; }
 
-        .diff-row { white-space: pre; min-height: 1.6em; }
+        .diff-row { white-space: pre; height: 26px; line-height: 26px; font-size: 16px; min-height: 26px; box-sizing: border-box; }
         .diff-row.diff-changed { background: rgba(255, 255, 255, 0.03); }
         .diff-row.diff-new { color: #6a9955; background: rgba(106, 153, 85, 0.12); font-style: italic; }
         .diff-row.diff-empty { color: transparent; }
@@ -118,6 +118,8 @@ HTML_TEMPLATE = """
         <div class="batch-panel">
             <label for="batch-size">Строк за раз (N):</label>
             <input type="number" id="batch-size" value="100" min="1" step="1" onchange="onBatchSizeChange()">
+            <label for="start-line" style="margin-left: 10px;">Начать со строки:</label>
+            <input type="number" id="start-line" value="1" min="1" step="1" onchange="onStartLineChange()">
             <button id="batch-action-btn" onclick="handleBatchAction()">Копировать блок</button>
             <span id="batch-error-msg"></span>
             <span id="chunk-status">Блок: - / 0</span>
@@ -227,6 +229,7 @@ HTML_TEMPLATE = """
 
             if (diffViewActive) {
                 syncDiffPaneRowCount(currentLines);
+                syncRowHeights();
             }
         }
 
@@ -241,6 +244,28 @@ HTML_TEMPLATE = """
 
         function onBatchSizeChange() {
             // Changing N mid-flow only affects the *next* batch; just refresh the status label.
+            updateChunkStatus();
+        }
+
+        function onStartLineChange() {
+            const el = document.getElementById('start-line');
+            let val = parseInt(el.value, 10);
+            const total = getEditorLines().length;
+            
+            if (isNaN(val) || val < 1) {
+                val = 1;
+            } else if (val > total && total > 0) {
+                val = total;
+            }
+            el.value = val;
+
+            currentIndex = val - 1;
+            batchState = 'copy';
+            activeBatchLineCount = 0;
+            stopPasteListening();
+            clearBatchError();
+            
+            updateBatchButton();
             updateChunkStatus();
         }
 
@@ -264,6 +289,13 @@ HTML_TEMPLATE = """
                 statusEl.textContent = 'Блок: - / 0';
                 return;
             }
+
+            // Sync start-line input value to currentIndex + 1
+            const startLineEl = document.getElementById('start-line');
+            if (startLineEl && document.activeElement !== startLineEl) {
+                startLineEl.value = currentIndex + 1;
+            }
+
             if (currentIndex >= total) {
                 statusEl.textContent = `Блок: завершено / ${total}`;
                 return;
@@ -327,8 +359,10 @@ HTML_TEMPLATE = """
             }
             endChar = Math.min(endChar - 1, textarea.value.length); // trim trailing newline
 
+            const savedScrollTop = textarea.scrollTop;
             textarea.focus();
             textarea.setSelectionRange(startChar, Math.max(startChar, endChar));
+            textarea.scrollTop = savedScrollTop;
         }
 
         async function copyBatch() {
@@ -471,6 +505,27 @@ HTML_TEMPLATE = """
             }
         }
 
+        async function refreshDiffData(filepath) {
+            const diffPane = document.getElementById('diff-pane');
+            const res = await fetch(`/get_diff?file=${encodeURIComponent(filepath)}`);
+            const result = await res.json();
+
+            if (!result.available) {
+                diffPane.innerHTML = `<div class="diff-status-msg">Git diff недоступен: ${escapeHtml(result.reason || 'неизвестная причина')}</div>`;
+                diffData = null;
+                diffLoadedForFile = null;
+                return;
+            }
+
+            diffData = result.diff;
+            diffLoadedForFile = filepath;
+
+            if (diffViewActive) {
+                renderDiffPane();
+                syncRowHeights();
+            }
+        }
+
         async function toggleDiffView() {
             const filepath = document.getElementById('file-select').value;
             if (!filepath) return;
@@ -486,23 +541,13 @@ HTML_TEMPLATE = """
                 diffPane.innerHTML = '<div class="diff-status-msg">Загрузка git diff...</div>';
                 setDiffViewActive(true);
 
-                const res = await fetch(`/get_diff?file=${encodeURIComponent(filepath)}`);
-                const result = await res.json();
-
-                if (!result.available) {
-                    diffPane.innerHTML = `<div class="diff-status-msg">Git diff недоступен: ${escapeHtml(result.reason || 'неизвестная причина')}</div>`;
-                    diffData = null;
-                    diffLoadedForFile = null;
-                    return;
-                }
-
-                diffData = result.diff;
-                diffLoadedForFile = filepath;
+                await refreshDiffData(filepath);
             } else {
                 setDiffViewActive(true);
+                renderDiffPane();
+                syncRowHeights();
             }
 
-            renderDiffPane();
             setupScrollSync();
         }
 
@@ -599,6 +644,65 @@ HTML_TEMPLATE = """
             });
         }
 
+        function syncRowHeights() {
+            if (!diffViewActive) return;
+
+            const textarea = document.getElementById('text-editor');
+            const lines = getEditorLines();
+            const diffPane = document.getElementById('diff-pane');
+            const rows = diffPane.getElementsByClassName('diff-row');
+
+            if (rows.length !== lines.length) return;
+
+            const computedStyle = window.getComputedStyle(textarea);
+            
+            let mirror = document.getElementById('textarea-mirror');
+            if (!mirror) {
+                mirror = document.createElement('div');
+                mirror.id = 'textarea-mirror';
+                mirror.style.position = 'absolute';
+                mirror.style.visibility = 'hidden';
+                mirror.style.top = '-9999px';
+                mirror.style.left = '-9999px';
+                mirror.style.boxSizing = 'border-box';
+                document.body.appendChild(mirror);
+            }
+
+            // Set mirror width and horizontal padding to match textarea inner content width
+            mirror.style.width = textarea.clientWidth + 'px';
+            mirror.style.paddingLeft = computedStyle.paddingLeft;
+            mirror.style.paddingRight = computedStyle.paddingRight;
+            mirror.style.fontFamily = computedStyle.fontFamily;
+            mirror.style.fontSize = computedStyle.fontSize;
+            mirror.style.lineHeight = computedStyle.lineHeight;
+
+            // Clear and build mirror children
+            mirror.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+            for (let i = 0; i < lines.length; i++) {
+                const item = document.createElement('div');
+                item.style.whiteSpace = 'pre-wrap';
+                item.style.wordBreak = 'break-word';
+                item.textContent = lines[i] || '\u00A0';
+                fragment.appendChild(item);
+            }
+            mirror.appendChild(fragment);
+
+            // Read heights and apply to diff rows as minHeight
+            const children = mirror.children;
+            for (let i = 0; i < lines.length; i++) {
+                const height = children[i].offsetHeight;
+                const row = rows[i];
+                if (row) {
+                    row.style.minHeight = height + 'px';
+                    row.style.height = '';
+                    row.style.boxSizing = 'border-box';
+                }
+            }
+        }
+
+        window.addEventListener('resize', syncRowHeights);
+
         // ================= End Git Diff View =================
 
         async function saveData() {
@@ -616,6 +720,12 @@ HTML_TEMPLATE = """
 
             if (res.ok) {
                 showStatus('Успешно сохранено!');
+                
+                // If diff view is active or we have loaded diff for this file, refresh it
+                if (diffViewActive || diffLoadedForFile === filepath) {
+                    await refreshDiffData(filepath);
+                }
+
                 setTimeout(() => showStatus(''), 3000);
             } else {
                 const errText = await res.text();
