@@ -1,12 +1,23 @@
 from flask import Flask, render_template_string, request, jsonify
 import re
 import os
+import sys
 import subprocess
 import difflib
 
 app = Flask(__name__)
 
-PROJECT_DIR = os.getcwd()
+# Resolution order for the project folder to scan:
+# 1) command-line argument:  python RUN.py "C:\path\to\project"
+# 2) environment variable:   RPY_PROJECT_DIR
+# 3) fallback: the folder this script lives in
+if len(sys.argv) > 1:
+    PROJECT_DIR = os.path.abspath(sys.argv[1])
+elif os.environ.get('RPY_PROJECT_DIR'):
+    PROJECT_DIR = os.path.abspath(os.environ['RPY_PROJECT_DIR'])
+else:
+    PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 TEXT_PATTERN = re.compile(r'^(\s*)"([^"\\]*(?:\\.[^"\\]*)*)"(\s*)$')
 WORD_TOKEN_PATTERN = re.compile(r'\w+|[^\w\s]|\s+', re.UNICODE)
 
@@ -33,7 +44,7 @@ def word_diff_segments(old_text, new_text):
             segments.append({'op': 'insert', 'text': ''.join(new_tokens[j1:j2])})
     return segments
 
-HTML_TEMPLATE = """
+HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -147,6 +158,12 @@ HTML_TEMPLATE = """
                 <select id="file-select" onchange="loadFile()"></select>
                 <button class="btn-reload" onclick="scanFiles()" title="Обновить список файлов">🔄</button>
             </div>
+            <div class="controls" style="max-width: 320px;">
+                <label for="commit-select"><b>База Diff:</b></label>
+                <select id="commit-select" onchange="onCommitChange()">
+                    <option value="HEAD">HEAD (Текущий коммит)</option>
+                </select>
+            </div>
             <button id="save-btn" onclick="saveData()">Сохранить изменения</button>
             <button id="diff-toggle-btn" class="btn-diff" onclick="toggleDiffView()">🔀 Git Diff</button>
         </div>
@@ -183,6 +200,7 @@ HTML_TEMPLATE = """
         let diffViewActive = false;
         let diffData = null;
         let diffLoadedForFile = null;
+        let diffLoadedForRef = null;
         let isSyncingScroll = false;
 
         async function scanFiles() {
@@ -203,7 +221,31 @@ HTML_TEMPLATE = """
                 select.appendChild(opt);
             });
 
+            await loadCommits();
             loadFile();
+        }
+
+        async function loadCommits() {
+            const res = await fetch('/get_commits');
+            const data = await res.json();
+            const select = document.getElementById('commit-select');
+
+            select.innerHTML = '<option value="HEAD">HEAD (Текущий коммит)</option>';
+            select.innerHTML += '<option value="HEAD~1">HEAD~1 (Преддыдущий коммит)</option>';
+
+            if (data.error) {
+                console.warn('get_commits error:', data.error);
+                showStatus('Git недоступен: ' + data.error);
+            }
+
+            (data.commits || []).forEach(c => {
+                if (c.hash !== 'HEAD') {
+                    const opt = document.createElement('option');
+                    opt.value = c.hash;
+                    opt.textContent = `${c.hash} — ${c.subject}`;
+                    select.appendChild(opt);
+                }
+            });
         }
 
         async function loadFile() {
@@ -227,6 +269,7 @@ HTML_TEMPLATE = """
 
             diffData = null;
             diffLoadedForFile = null;
+            diffLoadedForRef = null;
             setDiffViewActive(false);
 
             validateLines();
@@ -235,7 +278,7 @@ HTML_TEMPLATE = """
 
         function validateLines() {
             const text = document.getElementById('text-editor').value;
-            const currentLines = text ? text.split('\\n').length : 0;
+            const currentLines = text ? text.split('\n').length : 0;
 
             const counterBadge = document.getElementById('line-counter');
             const saveBtn = document.getElementById('save-btn');
@@ -296,7 +339,7 @@ HTML_TEMPLATE = """
 
         function getEditorLines() {
             const text = document.getElementById('text-editor').value;
-            return text.length ? text.split('\\n') : [];
+            return text.length ? text.split('\n') : [];
         }
 
         function clearBatchError() {
@@ -403,7 +446,7 @@ HTML_TEMPLATE = """
             const n = getBatchSize();
             const end = Math.min(currentIndex + n, total);
             const chunkLines = lines.slice(currentIndex, end);
-            const chunkText = chunkLines.join('\\n');
+            const chunkText = chunkLines.join('\n');
 
             try {
                 await navigator.clipboard.writeText(chunkText);
@@ -465,7 +508,7 @@ HTML_TEMPLATE = """
         }
 
         function applyPastedBatch(clipboardText) {
-            const pastedLines = clipboardText.length ? clipboardText.split(/\\r\\n|\\r|\\n/) : [];
+            const pastedLines = clipboardText.length ? clipboardText.split(/\r\n|\r|\n/) : [];
 
             if (pastedLines.length !== activeBatchLineCount) {
                 showBatchError(
@@ -485,7 +528,7 @@ HTML_TEMPLATE = """
                 .concat(lines.slice(end));
 
             const textarea = document.getElementById('text-editor');
-            textarea.value = newLines.join('\\n');
+            textarea.value = newLines.join('\n');
 
             currentIndex = end;
             activeBatchLineCount = 0;
@@ -521,21 +564,33 @@ HTML_TEMPLATE = """
 
         async function refreshDiffData(filepath) {
             const diffPane = document.getElementById('diff-pane');
-            const res = await fetch(`/get_diff?file=${encodeURIComponent(filepath)}`);
+            const ref = document.getElementById('commit-select').value;
+            const res = await fetch(`/get_diff?file=${encodeURIComponent(filepath)}&ref=${encodeURIComponent(ref)}`);
             const result = await res.json();
 
             if (!result.available) {
                 diffPane.innerHTML = `<div class="diff-status-msg">Git diff недоступен: ${escapeHtml(result.reason || 'неизвестная причина')}</div>`;
                 diffData = null;
                 diffLoadedForFile = null;
+                diffLoadedForRef = null;
                 return;
             }
 
             diffData = result.diff;
             diffLoadedForFile = filepath;
+            diffLoadedForRef = ref;
 
             if (diffViewActive) {
                 renderDiffPane();
+            }
+        }
+
+        async function onCommitChange() {
+            const filepath = document.getElementById('file-select').value;
+            if (filepath && diffViewActive) {
+                const diffPane = document.getElementById('diff-pane');
+                diffPane.innerHTML = '<div class="diff-status-msg">Загрузка git diff...</div>';
+                await refreshDiffData(filepath);
             }
         }
 
@@ -548,7 +603,8 @@ HTML_TEMPLATE = """
                 return;
             }
 
-            if (diffLoadedForFile !== filepath) {
+            const currentRef = document.getElementById('commit-select').value;
+            if (diffLoadedForFile !== filepath || diffLoadedForRef !== currentRef) {
                 const diffPane = document.getElementById('diff-pane');
                 diffPane.innerHTML = '<div class="diff-status-msg">Загрузка git diff...</div>';
                 setDiffViewActive(true);
@@ -709,6 +765,36 @@ def list_files():
 
     return jsonify(sorted(rpy_files))
 
+@app.route('/get_commits')
+def get_commits():
+    ok, reason = is_inside_git_repo()
+    if not ok:
+        print(f"[get_commits] not a git repo at {PROJECT_DIR}: {reason}")
+        return jsonify({'commits': [], 'error': f'Не git-репозиторий ({PROJECT_DIR}): {reason}'})
+
+    try:
+        result = subprocess.run(
+            ['git', 'log', '-n', '20', '--pretty=format:%h|%s'],
+            cwd=PROJECT_DIR, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=5
+        )
+        if result.returncode != 0:
+            print(f"[get_commits] git log failed: {result.stderr}")
+            return jsonify({'commits': [], 'error': (result.stderr or 'git log завершился с ошибкой').strip()})
+
+        commits = []
+        for line in result.stdout.strip().split('\n'):
+            if '|' in line:
+                h, msg = line.split('|', 1)
+                commits.append({'hash': h, 'subject': msg})
+        return jsonify({'commits': commits, 'error': None})
+    except FileNotFoundError:
+        print("[get_commits] git executable not found in PATH")
+        return jsonify({'commits': [], 'error': 'Git не найден в PATH'})
+    except Exception as e:
+        print(f"[get_commits] unexpected error: {e}")
+        return jsonify({'commits': [], 'error': str(e)})
+
 @app.route('/get_data')
 def get_data():
     filepath = request.args.get('file', '')
@@ -749,24 +835,28 @@ def is_inside_git_repo():
             ['git', 'rev-parse', '--is-inside-work-tree'],
             cwd=PROJECT_DIR, capture_output=True, text=True, timeout=5
         )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return False
+        if result.returncode == 0:
+            return True, None
+        return False, (result.stderr or 'git rev-parse завершился с ошибкой').strip()
+    except FileNotFoundError:
+        return False, 'Команда git не найдена (не установлен или не в PATH)'
+    except subprocess.SubprocessError as e:
+        return False, str(e)
 
 
-def get_git_head_text(relpath):
+def get_git_revision_text(relpath, ref='HEAD'):
     try:
         normalized_path = relpath.replace('\\', '/')
         if not normalized_path.startswith('./'):
             normalized_path = './' + normalized_path
 
         result = subprocess.run(
-            ['git', 'show', f'HEAD:{normalized_path}'],
+            ['git', 'show', f'{ref}:{normalized_path}'],
             cwd=PROJECT_DIR, capture_output=True, text=True,
             encoding='utf-8', errors='replace', timeout=10
         )
         if result.returncode != 0:
-            return None, (result.stderr or 'Файл не найден в последнем коммите (HEAD)').strip()
+            return None, (result.stderr or f'Файл не найден в ревизии {ref}').strip()
         return result.stdout, None
     except FileNotFoundError:
         return None, 'Git не установлен или недоступен в PATH'
@@ -777,15 +867,17 @@ def get_git_head_text(relpath):
 @app.route('/get_diff')
 def get_diff():
     filepath = request.args.get('file', '')
+    ref = request.args.get('ref', 'HEAD')
     full_path = os.path.join(PROJECT_DIR, filepath)
 
     if not os.path.exists(full_path):
         return jsonify({'available': False, 'reason': 'Файл не найден'})
 
-    if not is_inside_git_repo():
-        return jsonify({'available': False, 'reason': 'Папка проекта не является git-репозиторием'})
+    repo_ok, repo_reason = is_inside_git_repo()
+    if not repo_ok:
+        return jsonify({'available': False, 'reason': f'Папка проекта не является git-репозиторием: {repo_reason}'})
 
-    head_content, err = get_git_head_text(filepath)
+    head_content, err = get_git_revision_text(filepath, ref)
     if head_content is None:
         return jsonify({'available': False, 'reason': err})
 
@@ -861,5 +953,25 @@ def save_data():
     return 'OK', 200
 
 if __name__ == '__main__':
+    print(f"Папка проекта: {PROJECT_DIR}")
+
+    found = []
+    for root, dirs, files in os.walk(PROJECT_DIR):
+        for file in files:
+            if file.endswith('.rpy') and not file.endswith('_updated.rpy'):
+                found.append(os.path.relpath(os.path.join(root, file), PROJECT_DIR))
+    if found:
+        print(f"Найдено .rpy файлов: {len(found)} (например: {found[0]})")
+    else:
+        print("ВНИМАНИЕ: .rpy файлы не найдены в этой папке и её подпапках.")
+        print("Укажите правильную папку так:  python RUN.py \"C:\\путь\\к\\проекту\"")
+
+    repo_ok, repo_reason = is_inside_git_repo()
+    if repo_ok:
+        print("Git-репозиторий: обнаружен.")
+    else:
+        print(f"Git-репозиторий НЕ обнаружен: {repo_reason}")
+        print("Диффы будут недоступны, пока PROJECT_DIR не указывает внутрь git-репозитория.")
+
     print("Редактор запущен! Откройте браузер: http://127.0.0.1:5000")
     app.run(port=5000)
