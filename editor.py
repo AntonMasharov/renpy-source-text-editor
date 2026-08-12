@@ -18,7 +18,7 @@ elif os.environ.get('RPY_PROJECT_DIR'):
 else:
     PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-TEXT_PATTERN = re.compile(r'^(\s*)"([^"\\]*(?:\\.[^"\\]*)*)"(\s*)$')
+TEXT_PATTERN = re.compile(r'^(\s*)(?:([a-zA-Z_]\w*)\s+)?"([^"\\]*(?:\\.[^"\\]*)*)"(\s*)$')
 WORD_TOKEN_PATTERN = re.compile(r'\w+|[^\w\s]|\s+', re.UNICODE)
 
 
@@ -54,7 +54,7 @@ HTML_TEMPLATE = r"""
         .container { width: 100%; max-width: none; padding: 0 20px; box-sizing: border-box; margin: 0; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; background: #222; padding: 15px 20px; border-radius: 8px; border: 1px solid #333; gap: 15px; }
         .controls { display: flex; align-items: center; gap: 10px; flex-grow: 1; }
-        select { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 8px 12px; border-radius: 6px; font-size: 14px; flex-grow: 1; max-width: 400px; cursor: pointer; }
+        select { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 8px 12px; border-radius: 6px; font-size: 14px; flex-grow: 1; max-width: 250px; cursor: pointer; }
         select:focus { border-color: #007acc; outline: none; }
 
         button { background: #0e639c; color: white; border: none; padding: 9px 20px; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 14px; transition: all 0.2s; white-space: nowrap; }
@@ -810,7 +810,7 @@ def get_data():
     for line in lines:
         match = TEXT_PATTERN.match(line)
         if match:
-            clean_text = match.group(2).replace('\\"', '"')
+            clean_text = match.group(3).replace('\\"', '"')
             pure_lines.append(clean_text)
 
     return jsonify({
@@ -824,10 +824,9 @@ def extract_pure_lines(raw_text):
     for line in raw_text.splitlines():
         match = TEXT_PATTERN.match(line)
         if match:
-            clean_text = match.group(2).replace('\\"', '"')
+            clean_text = match.group(3).replace('\\"', '"')  # Меняем group(2) на group(3)
             pure_lines.append(clean_text)
     return pure_lines
-
 
 def is_inside_git_repo():
     try:
@@ -938,11 +937,12 @@ def save_data():
         match = TEXT_PATTERN.match(line)
         if match:
             indent = match.group(1)
+            char_tag = f"{match.group(2)} " if match.group(2) else ""  # Сохраняем тег персонажа
             trailing_newline = "\n" if line.endswith('\n') else ""
 
             new_text = edited_lines[text_idx]
             new_text = new_text.replace('"', '\\"')
-            output_lines.append(f'{indent}"{new_text}"{trailing_newline}')
+            output_lines.append(f'{indent}{char_tag}"{new_text}"{trailing_newline}')
             text_idx += 1
         else:
             output_lines.append(line)
