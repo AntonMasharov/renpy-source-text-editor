@@ -926,10 +926,10 @@ def get_data():
             pure_lines.append(clean_text)
             # 'line' is the 1-based line number in the source .rpy file, and
             # 'char' is the character id given explicitly on this line, or
-            # 'me' if none is given. Purely for display in the editor's
-            # gutter - doesn't affect the plain text in the textarea or on
-            # save.
-            meta.append({'line': line_number, 'char': match.group(2) or 'me'})
+            # an empty string if the line has none. Purely for display in
+            # the editor's gutter - doesn't affect the plain text in the
+            # textarea or on save.
+            meta.append({'line': line_number, 'char': match.group(2) or ''})
 
     return jsonify({
         'text': "\n".join(pure_lines),

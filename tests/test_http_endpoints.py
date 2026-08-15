@@ -68,19 +68,19 @@ class TestGetDataMetadata:
     """
     Coverage for the per-line 'meta' field: the original 1-based line
     number in the source file, and the character id given explicitly on
-    that line (or 'me' if the line has none).
+    that line (empty string if the line has none).
 
     This is purely display metadata for the editor's gutter - it must line
     up index-for-index with the lines in 'text', but must never change the
     content of 'text' itself.
     """
 
-    def test_line_with_no_character_id_defaults_to_me(self, client, project_dir):
+    def test_line_with_no_character_id_has_empty_char(self, client, project_dir):
         write_rpy(project_dir, "scene.rpy", '"Narration only."\n')
 
         data = client.get("/get_data?file=scene.rpy").get_json()
 
-        assert data["meta"] == [{"line": 1, "char": "me"}]
+        assert data["meta"] == [{"line": 1, "char": ""}]
 
     def test_character_line_reports_its_explicit_character_id(self, client, project_dir):
         write_rpy(project_dir, "scene.rpy", 'dv "Hello."\n')
@@ -89,13 +89,13 @@ class TestGetDataMetadata:
 
         assert data["meta"] == [{"line": 1, "char": "dv"}]
 
-    def test_untagged_lines_are_always_me_regardless_of_neighboring_tags(self, client, project_dir):
-        raw = 'dv "Tagged."\n"Untagged - not dv, just me."\ncs "Tagged again."\n'
+    def test_untagged_lines_are_always_empty_regardless_of_neighboring_tags(self, client, project_dir):
+        raw = 'dv "Tagged."\n"Untagged."\ncs "Tagged again."\n'
         write_rpy(project_dir, "scene.rpy", raw)
 
         data = client.get("/get_data?file=scene.rpy").get_json()
 
-        assert [m["char"] for m in data["meta"]] == ["dv", "me", "cs"]
+        assert [m["char"] for m in data["meta"]] == ["dv", "", "cs"]
 
     def test_line_numbers_reflect_position_in_the_original_file_not_in_the_pure_text(
         self, client, project_dir
@@ -123,14 +123,14 @@ class TestGetDataMetadata:
         lines = data["text"].split("\n")
 
         assert len(data["meta"]) == len(lines) == data["count"]
-        # Unattributed narration defaults to 'me'.
-        assert data["meta"][0]["char"] == "me"
+        # Unattributed narration has no character id.
+        assert data["meta"][0]["char"] == ""
         # `dv "Проснулась, ...` is an explicit tag.
         idx = lines.index("Проснулась, спящая красавица моя?")
         assert data["meta"][idx]["char"] == "dv"
-        # The very next line is untagged narration, so it's 'me' - even
+        # The very next line is untagged narration, so it has no id - even
         # though dv was the line right before it.
-        assert data["meta"][idx + 1]["char"] == "me"
+        assert data["meta"][idx + 1]["char"] == ""
 
 
 class TestSaveData:
