@@ -53,7 +53,8 @@ HTML_TEMPLATE = r"""
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #181818; color: #d4d4d4; padding: 20px; margin: 0; }
         .container { width: 100%; max-width: none; padding: 0 20px; box-sizing: border-box; margin: 0; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; background: #222; padding: 15px 20px; border-radius: 8px; border: 1px solid #333; gap: 15px; }
-        .controls { display: flex; align-items: center; gap: 10px; flex-grow: 1; }
+        .controls { display: flex; align-items: center; gap: 10px; flex-grow: 1; min-width: 0; }
+        .controls label { white-space: nowrap; flex-shrink: 0; }
         select { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 8px 12px; border-radius: 6px; font-size: 14px; flex-grow: 1; max-width: 250px; cursor: pointer; }
         select:focus { border-color: #007acc; outline: none; }
 
@@ -112,7 +113,8 @@ HTML_TEMPLATE = r"""
         }
 
         textarea {
-            width: 100%;
+            flex: 1 1 0;
+            min-width: 0;
             height: 100%;
             background: transparent;
             color: #9cdcfe;
@@ -122,17 +124,45 @@ HTML_TEMPLATE = r"""
         textarea:focus { outline: none; }
 
         .editor-box.split textarea {
-            width: 50%;
             border-right: 1px solid #3c3c3c;
         }
 
         .diff-pane {
             display: none;
-            width: 50%;
+            flex: 1 1 0;
+            min-width: 0;
             height: 100%;
             background: #1e1e1e;
         }
         .editor-box.split .diff-pane { display: block; }
+
+        /* Line-number / character-id gutter. Purely a read-only visual aid:
+           it lives outside the <textarea>, so selecting/copying editor text
+           never picks up the numbers or ids alongside it. */
+        .gutter {
+            flex: 0 0 62px;
+            height: 100%;
+            background: #181818;
+            border-right: 1px solid #3c3c3c;
+            overflow: hidden;
+            box-sizing: border-box;
+            padding: 15px 6px 15px 8px;
+            font-family: "Consolas", "Fira Code", "Courier New", monospace;
+            font-size: 11px;
+            line-height: 22px; /* must match textarea/diff-pane for row alignment */
+            color: #6a737d;
+            user-select: none;
+            cursor: default;
+        }
+        .gutter-row {
+            height: 22px;
+            line-height: 22px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .gutter-row .g-line { color: #6a737d; }
+        .gutter-row .g-char { color: #c586c0; margin-left: 4px; }
 
         /* Строки diff без обрезок и многоточий */
         .diff-row {
@@ -184,6 +214,7 @@ HTML_TEMPLATE = r"""
             </div>
         </div>
         <div class="editor-box" id="editor-box">
+            <div class="gutter" id="gutter" title="Номер строки в исходном файле и id персонажа"></div>
             <textarea id="text-editor" oninput="validateLines()" wrap="off" placeholder="Выберите .rpy файл из списка выше..."></textarea>
             <div class="diff-pane" id="diff-pane"></div>
         </div>
@@ -202,6 +233,8 @@ HTML_TEMPLATE = r"""
         let diffLoadedForFile = null;
         let diffLoadedForRef = null;
         let isSyncingScroll = false;
+
+        let gutterMeta = [];
 
         async function scanFiles() {
             const res = await fetch('/list_files');
@@ -259,6 +292,9 @@ HTML_TEMPLATE = r"""
             document.getElementById('text-editor').value = data.text;
             originalLineCount = data.count;
 
+            gutterMeta = data.meta || [];
+            renderGutter();
+
             currentIndex = 0;
             batchState = 'copy';
             activeBatchLineCount = 0;
@@ -298,6 +334,8 @@ HTML_TEMPLATE = r"""
             }
 
             updateChunkStatus();
+
+            syncGutterRowCount(currentLines);
 
             if (diffViewActive) {
                 syncDiffPaneRowCount(currentLines);
@@ -686,6 +724,78 @@ HTML_TEMPLATE = r"""
             }
         }
 
+        function buildGutterRow(meta) {
+            const row = document.createElement('div');
+            row.className = 'gutter-row';
+
+            if (!meta) {
+                row.innerHTML = '&nbsp;';
+                return row;
+            }
+
+            const lineSpan = document.createElement('span');
+            lineSpan.className = 'g-line';
+            lineSpan.textContent = meta.line;
+            row.appendChild(lineSpan);
+
+            if (meta.char) {
+                const charSpan = document.createElement('span');
+                charSpan.className = 'g-char';
+                charSpan.textContent = meta.char;
+                row.appendChild(charSpan);
+            }
+
+            row.title = meta.char ? `Строка ${meta.line} · ${meta.char}` : `Строка ${meta.line}`;
+            return row;
+        }
+
+        function renderGutter() {
+            const gutter = document.getElementById('gutter');
+            gutter.innerHTML = '';
+
+            const frag = document.createDocumentFragment();
+            gutterMeta.forEach(meta => frag.appendChild(buildGutterRow(meta)));
+            gutter.appendChild(frag);
+        }
+
+        function syncGutterRowCount(targetCount) {
+            const gutter = document.getElementById('gutter');
+            const current = gutter.children.length;
+
+            if (current === targetCount) return;
+
+            if (current < targetCount) {
+                const frag = document.createDocumentFragment();
+                for (let i = current; i < targetCount; i++) {
+                    frag.appendChild(buildGutterRow(i < gutterMeta.length ? gutterMeta[i] : null));
+                }
+                gutter.appendChild(frag);
+            } else {
+                for (let i = current - 1; i >= targetCount; i--) {
+                    gutter.removeChild(gutter.children[i]);
+                }
+            }
+        }
+
+        let gutterScrollSyncInitialized = false;
+        function setupGutterScrollSync() {
+            if (gutterScrollSyncInitialized) return;
+            gutterScrollSyncInitialized = true;
+
+            const editor = document.getElementById('text-editor');
+            const gutter = document.getElementById('gutter');
+            let isSyncingGutterScroll = false;
+
+            // Vertical only: the gutter column stays put horizontally even
+            // if the (unwrapped) editor text scrolls sideways.
+            editor.addEventListener('scroll', () => {
+                if (isSyncingGutterScroll) return;
+                isSyncingGutterScroll = true;
+                gutter.scrollTop = editor.scrollTop;
+                isSyncingGutterScroll = false;
+            });
+        }
+
         let scrollSyncInitialized = false;
         function setupScrollSync() {
             if (scrollSyncInitialized) return;
@@ -744,6 +854,7 @@ HTML_TEMPLATE = r"""
             document.getElementById('status-msg').textContent = msg;
         }
 
+        setupGutterScrollSync();
         scanFiles();
     </script>
 </body>
@@ -801,21 +912,29 @@ def get_data():
     full_path = os.path.join(PROJECT_DIR, filepath)
 
     if not os.path.exists(full_path):
-        return jsonify({'text': '', 'count': 0})
+        return jsonify({'text': '', 'count': 0, 'meta': []})
 
     with open(full_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
     pure_lines = []
-    for line in lines:
+    meta = []
+    for line_number, line in enumerate(lines, start=1):
         match = TEXT_PATTERN.match(line)
         if match:
             clean_text = match.group(3).replace('\\"', '"')
             pure_lines.append(clean_text)
+            # 'line' is the 1-based line number in the source .rpy file, and
+            # 'char' is the character id given explicitly on this line, or
+            # 'me' if none is given. Purely for display in the editor's
+            # gutter - doesn't affect the plain text in the textarea or on
+            # save.
+            meta.append({'line': line_number, 'char': match.group(2) or 'me'})
 
     return jsonify({
         'text': "\n".join(pure_lines),
-        'count': len(pure_lines)
+        'count': len(pure_lines),
+        'meta': meta
     })
 
 

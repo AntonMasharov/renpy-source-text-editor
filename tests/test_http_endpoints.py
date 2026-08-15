@@ -23,7 +23,9 @@ class TestGetData:
         response = client.get("/get_data?file=scene.rpy")
 
         assert response.status_code == 200
-        assert response.get_json() == {"text": "Just narration.", "count": 1}
+        data = response.get_json()
+        assert data["text"] == "Just narration."
+        assert data["count"] == 1
 
     def test_returns_spoken_text_not_character_id_for_tagged_lines(self, client, project_dir):
         """Regression test for the reported bug."""
@@ -52,14 +54,83 @@ class TestGetData:
         response = client.get("/get_data?file=missing.rpy")
 
         assert response.status_code == 200
-        assert response.get_json() == {"text": "", "count": 0}
+        assert response.get_json() == {"text": "", "count": 0, "meta": []}
 
     def test_file_with_no_dialogue_returns_zero_count(self, client, project_dir):
         write_rpy(project_dir, "scene.rpy", "label start:\n    scene bg room\n    window hide\n")
 
         response = client.get("/get_data?file=scene.rpy")
 
-        assert response.get_json() == {"text": "", "count": 0}
+        assert response.get_json() == {"text": "", "count": 0, "meta": []}
+
+
+class TestGetDataMetadata:
+    """
+    Coverage for the per-line 'meta' field: the original 1-based line
+    number in the source file, and the character id given explicitly on
+    that line (or 'me' if the line has none).
+
+    This is purely display metadata for the editor's gutter - it must line
+    up index-for-index with the lines in 'text', but must never change the
+    content of 'text' itself.
+    """
+
+    def test_line_with_no_character_id_defaults_to_me(self, client, project_dir):
+        write_rpy(project_dir, "scene.rpy", '"Narration only."\n')
+
+        data = client.get("/get_data?file=scene.rpy").get_json()
+
+        assert data["meta"] == [{"line": 1, "char": "me"}]
+
+    def test_character_line_reports_its_explicit_character_id(self, client, project_dir):
+        write_rpy(project_dir, "scene.rpy", 'dv "Hello."\n')
+
+        data = client.get("/get_data?file=scene.rpy").get_json()
+
+        assert data["meta"] == [{"line": 1, "char": "dv"}]
+
+    def test_untagged_lines_are_always_me_regardless_of_neighboring_tags(self, client, project_dir):
+        raw = 'dv "Tagged."\n"Untagged - not dv, just me."\ncs "Tagged again."\n'
+        write_rpy(project_dir, "scene.rpy", raw)
+
+        data = client.get("/get_data?file=scene.rpy").get_json()
+
+        assert [m["char"] for m in data["meta"]] == ["dv", "me", "cs"]
+
+    def test_line_numbers_reflect_position_in_the_original_file_not_in_the_pure_text(
+        self, client, project_dir
+    ):
+        raw = (
+            'label start:\n'          # line 1, not dialogue
+            '    scene bg room\n'     # line 2, not dialogue
+            '    cs "First line."\n'  # line 3
+            '    window hide\n'       # line 4, not dialogue
+            '    me "Second line."\n' # line 5
+        )
+        write_rpy(project_dir, "scene.rpy", raw)
+
+        data = client.get("/get_data?file=scene.rpy").get_json()
+
+        assert data["meta"] == [
+            {"line": 3, "char": "cs"},
+            {"line": 5, "char": "me"},
+        ]
+
+    def test_meta_is_index_aligned_with_the_text_lines(self, client, project_dir, sample_rpy_text):
+        write_rpy(project_dir, "scene.rpy", sample_rpy_text)
+
+        data = client.get("/get_data?file=scene.rpy").get_json()
+        lines = data["text"].split("\n")
+
+        assert len(data["meta"]) == len(lines) == data["count"]
+        # Unattributed narration defaults to 'me'.
+        assert data["meta"][0]["char"] == "me"
+        # `dv "Проснулась, ...` is an explicit tag.
+        idx = lines.index("Проснулась, спящая красавица моя?")
+        assert data["meta"][idx]["char"] == "dv"
+        # The very next line is untagged narration, so it's 'me' - even
+        # though dv was the line right before it.
+        assert data["meta"][idx + 1]["char"] == "me"
 
 
 class TestSaveData:
